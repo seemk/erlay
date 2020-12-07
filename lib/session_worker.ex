@@ -39,7 +39,7 @@ defmodule Erlay.SessionWorker do
       {:buffer, 1500},
       {:recbuf, 32 * 1024 * 1024},
       {:sndbuf, 32 * 1024 * 1024},
-      {:read_packets, 1024},
+      {:read_packets, 128},
       {:raw, 0x0001, 0x000F, <<1::native-integer-32>>}
     ]
 
