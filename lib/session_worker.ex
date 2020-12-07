@@ -1,9 +1,6 @@
 defmodule Erlay.SessionWorker do
   use GenServer
 
-  alias Erlay.Sessions
-  alias Erlay.Metrics
-
   def start_link(args) do
     GenServer.start_link(__MODULE__, args)
   end
@@ -15,45 +12,59 @@ defmodule Erlay.SessionWorker do
   end
 
   @impl true
-  def handle_info(:start, %{address: address, sessions: sessions, metrics: metrics} = state) do
-    client_socket = open_socket(address, 3478)
-    peer_socket = open_socket(address, 3479)
+  def handle_info(
+        {:udp, socket, address, port, packet},
+        %{client_socket: client_socket, peer_socket: peer_socket} = state
+      ) do
+    case socket do
+      ^peer_socket ->
+        relay_data(packet, state)
 
-    spawn_link(__MODULE__, :client_loop, [client_socket, self(), sessions])
-    spawn_link(__MODULE__, :peer_loop, [client_socket, peer_socket, self(), sessions, metrics])
+      ^client_socket ->
+        <<id::little-integer-size(64), _rest::binary>> = packet
+        Erlay.Sessions.register(state[:sessions], id, {address, port})
+    end
+
     {:noreply, state}
   end
 
-  def client_loop(socket, parent, sessions) do
-    {:ok, {from, <<id::little-integer-size(64), _rest::binary>>}} =
-      :socket.recvfrom(socket, 32, [], :infinity)
+  @impl true
+  def handle_info(:start, %{address: address} = state) do
+    opts = [
+      :binary,
+      :inet,
+      {:ip, address},
+      {:active, true},
+      {:reuseaddr, true},
+      {:buffer, 1500},
+      {:recbuf, 32 * 1024 * 1024},
+      {:sndbuf, 32 * 1024 * 1024},
+      {:read_packets, 1024},
+      {:raw, 0x0001, 0x000F, <<1::native-integer-32>>}
+    ]
 
-    Sessions.register(sessions, id, from)
-    client_loop(socket, parent, sessions)
+    {:ok, client_socket} = :gen_udp.open(3478, opts)
+    {:ok, peer_socket} = :gen_udp.open(3479, opts)
+
+    {:noreply, Map.merge(state, %{client_socket: client_socket, peer_socket: peer_socket})}
   end
 
-  def peer_loop(client_socket, peer_socket, parent, sessions, metrics) do
-    {:ok, {_from, <<id::little-integer-size(64), _rest::binary>> = packet}} =
-      :socket.recvfrom(peer_socket, 1024, [], :infinity)
+  def relay_data(
+        packet,
+        %{client_socket: client_socket, sessions: sessions, metrics: metrics}
+      ) do
+    <<id::little-integer-size(64), _rest::binary>> = packet
 
     packet_size = byte_size(packet)
-    Metrics.add_bytes_received(metrics, packet_size)
+    Erlay.Metrics.add_bytes_received(metrics, packet_size)
 
-    to = Sessions.address_of(sessions, id)
+    case Erlay.Sessions.address_of(sessions, id) do
+      {addr, port} ->
+        :gen_udp.send(client_socket, addr, port, packet)
+        Erlay.Metrics.add_bytes_sent(metrics, packet_size)
 
-    if to do
-      :socket.sendto(client_socket, packet, to)
-      Metrics.add_bytes_sent(metrics, packet_size)
+      _ ->
+        nil
     end
-
-    peer_loop(client_socket, peer_socket, parent, sessions, metrics)
-  end
-
-  def open_socket(address, port) do
-    {:ok, socket} = :socket.open(:inet, :dgram, :udp)
-    :ok = :socket.setopt(socket, :socket, :reuseaddr, true)
-    :ok = :socket.setopt(socket, :socket, :reuseport, true)
-    {:ok, _port} = :socket.bind(socket, %{family: :inet, port: port, addr: address})
-    socket
   end
 end

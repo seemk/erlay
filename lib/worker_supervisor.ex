@@ -26,8 +26,9 @@ defmodule Erlay.WorkerSupervisor do
       id: MetricsReporter
     }
 
+    worker_count = 4
     workers =
-      Enum.map(1..System.schedulers_online(), fn id ->
+      Enum.map(1..worker_count, fn id ->
         %{start: {SessionWorker, :start_link, [args]}, id: {SessionWorker, id}}
       end)
 
